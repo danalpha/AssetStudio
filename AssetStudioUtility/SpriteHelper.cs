@@ -1,4 +1,5 @@
-﻿using System.Collections.Generic;
+﻿using System;
+using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
@@ -9,20 +10,35 @@ namespace AssetStudio
 {
     public static class SpriteHelper
     {
+        static Bitmap BitmapFromPivot(Bitmap bmp, Vector2 pivot)
+        {
+            PointF offset=new PointF((pivot.X-0.5f)* bmp.Width,(pivot.Y-0.5f)* bmp.Height);
+            Bitmap bmp2 = new Bitmap(bmp.Width+(int)(Math.Abs(offset.X)*2+0.5), bmp.Height + (int)(Math.Abs(offset.Y)*2 + 0.5));
+
+            using (Graphics g = Graphics.FromImage(bmp2))
+            {
+                g.DrawImage(bmp, new RectangleF((bmp2.Width - bmp.Width) / 2 - offset.X, (bmp2.Height - bmp.Height) / 2 + offset.Y, bmp.Width, bmp.Height), new RectangleF(0, 0, bmp.Width, bmp.Height), GraphicsUnit.Pixel);
+            }
+
+            return bmp2;
+        }
         public static Bitmap GetImage(this Sprite m_Sprite)
         {
             if (m_Sprite.m_SpriteAtlas != null && m_Sprite.m_SpriteAtlas.TryGet(out var m_SpriteAtlas))
             {
                 if (m_SpriteAtlas.m_RenderDataMap.TryGetValue(m_Sprite.m_RenderDataKey, out var spriteAtlasData) && spriteAtlasData.texture.TryGet(out var m_Texture2D))
                 {
-                    return CutImage(m_Texture2D, m_Sprite, spriteAtlasData.textureRect, spriteAtlasData.textureRectOffset, spriteAtlasData.settingsRaw);
+                    Bitmap bmp = CutImage(m_Texture2D, m_Sprite, spriteAtlasData.textureRect, spriteAtlasData.textureRectOffset, spriteAtlasData.settingsRaw);
+                    return bmp;
                 }
             }
             else
             {
                 if (m_Sprite.m_RD.texture.TryGet(out var m_Texture2D))
                 {
-                    return CutImage(m_Texture2D, m_Sprite, m_Sprite.m_RD.textureRect, m_Sprite.m_RD.textureRectOffset, m_Sprite.m_RD.settingsRaw);
+                    Bitmap bmp= CutImage(m_Texture2D, m_Sprite, m_Sprite.m_RD.textureRect, m_Sprite.m_RD.textureRectOffset, m_Sprite.m_RD.settingsRaw);
+                    //这里根据m_Sprite.m_Pivot来重新处理一下.
+                    return bmp;
                 }
             }
             return null;
@@ -30,22 +46,31 @@ namespace AssetStudio
 
         private static Bitmap CutImage(Texture2D m_Texture2D, Sprite m_Sprite, RectangleF textureRect, Vector2 textureRectOffset, SpriteSettings settingsRaw)
         {
-            var originalImage = m_Texture2D.ConvertToBitmap(false);
+            Vector2 pivot=m_Sprite.m_Pivot;
+            var version = m_Sprite.version;
+            if (version[0] < 5
+               || (version[0] == 5 && version[1] < 4)
+               || (version[0] == 5 && version[1] == 4 && version[2] <= 1)) //5.4.1p3 down
+            {
+                pivot = new Vector2(0.5f, 0.5f);
+            }
+
+                var originalImage = m_Texture2D.ConvertToBitmap(true);
             if (originalImage != null)
             {
+                //originalImage.Save("d:\\1.png");
                 using (originalImage)
                 {
-                    //var spriteImage = originalImage.Clone(textureRect, PixelFormat.Format32bppArgb);
-                    var textureRectI = Rectangle.Round(textureRect);
-                    var spriteImage = new Bitmap(textureRectI.Width, textureRectI.Height, PixelFormat.Format32bppArgb);
-                    var destRect = new Rectangle(0, 0, textureRectI.Width, textureRectI.Height);
-                    using (var graphic = Graphics.FromImage(spriteImage))
+                    var spriteImage = new Bitmap((int)m_Sprite.m_Rect.Width, (int)m_Sprite.m_Rect.Height, PixelFormat.Format32bppArgb);
+                    var srcRect = new RectangleF(m_Sprite.m_Rect.X, (m_Texture2D.m_Height - m_Sprite.m_Rect.Y - m_Sprite.m_Rect.Height), m_Sprite.m_Rect.Width, m_Sprite.m_Rect.Height);
+                    var dstRect = new RectangleF(0, 0, m_Sprite.m_Rect.Width, m_Sprite.m_Rect.Height);
+                    using (var g = Graphics.FromImage(spriteImage))
                     {
-                        graphic.DrawImage(originalImage, destRect, textureRectI, GraphicsUnit.Pixel);
+                        g.DrawImage(originalImage, dstRect, srcRect, GraphicsUnit.Pixel);
                     }
-                    if (settingsRaw.packed == 1)
-                    {
-                        //RotateAndFlip
+
+                    if(settingsRaw.packed == 1)
+                    {//这里与旋转相关,需要重新调查一下!
                         switch (settingsRaw.packingRotation)
                         {
                             case SpritePackingRotation.kSPRFlipHorizontal:
@@ -62,47 +87,63 @@ namespace AssetStudio
                                 break;
                         }
                     }
-
-                    //Tight
                     if (settingsRaw.packingMode == SpritePackingMode.kSPMTight)
                     {
+
+                        //这里明显使用到了多边形!!
                         try
                         {
                             var triangles = GetTriangles(m_Sprite.m_RD);
-                            var points = triangles.Select(x => x.Select(y => new PointF(y.X, y.Y)).ToArray());
-                            using (var path = new GraphicsPath())
+                            List<Point> point_list = new List<Point>();
+                            //找到最小的x,找到最小的y
+                            if (true)
                             {
-                                foreach (var p in points)
+                                List<Vector2> point_list_0 = new List<Vector2>();
+                                for (int i = 0; i < triangles.Length; i++)
                                 {
-                                    path.AddPolygon(p);
+                                    point_list_0.Add(triangles[i][0]);
+                                    point_list_0.Add(triangles[i][1]);
+                                    point_list_0.Add(triangles[i][2]);
                                 }
-                                using (var matr = new Matrix())
+
+                                float minx = 100000000;
+                                float miny = 100000000;
+                                foreach(Vector2 v in point_list_0)
                                 {
-                                    var version = m_Sprite.version;
-                                    if (version[0] < 5
-                                       || (version[0] == 5 && version[1] < 4)
-                                       || (version[0] == 5 && version[1] == 4 && version[2] <= 1)) //5.4.1p3 down
-                                    {
-                                        matr.Translate(m_Sprite.m_Rect.Width * 0.5f - textureRectOffset.X, m_Sprite.m_Rect.Height * 0.5f - textureRectOffset.Y);
-                                    }
-                                    else
-                                    {
-                                        matr.Translate(m_Sprite.m_Rect.Width * m_Sprite.m_Pivot.X - textureRectOffset.X, m_Sprite.m_Rect.Height * m_Sprite.m_Pivot.Y - textureRectOffset.Y);
-                                    }
-                                    matr.Scale(m_Sprite.m_PixelsToUnits, m_Sprite.m_PixelsToUnits);
-                                    path.Transform(matr);
-                                    var bitmap = new Bitmap(textureRectI.Width, textureRectI.Height);
-                                    using (var graphic = Graphics.FromImage(bitmap))
-                                    {
-                                        using (var brush = new TextureBrush(spriteImage))
-                                        {
-                                            graphic.FillPath(brush, path);
-                                            bitmap.RotateFlip(RotateFlipType.RotateNoneFlipY);
-                                            return bitmap;
-                                        }
-                                    }
+                                    if (v.X < minx) minx = v.X;
+                                    if (v.Y < miny) miny = v.Y;
+                                }
+                                foreach (Vector2 v in point_list_0)
+                                {
+                                    int nx = (int)((v.X - minx) * m_Sprite.m_PixelsToUnits + 0.5f);
+                                    int ny = (int)((v.Y - miny) * m_Sprite.m_PixelsToUnits + 0.5f);
+                                    point_list.Add(new Point(nx, spriteImage.Height - ny));
+                                }
+
+                            }
+                            var graphic_path = new GraphicsPath();
+                            if (true)
+                            {
+                                for (int i = 0; i < point_list.Count / 3; i++)
+                                {
+                                    List<Point> vector_list_2 = new List<Point>();
+                                    vector_list_2.Add(point_list[i * 3 + 0]);
+                                    vector_list_2.Add(point_list[i * 3 + 1]);
+                                    vector_list_2.Add(point_list[i * 3 + 2]);
+                                    graphic_path.AddPolygon(vector_list_2.ToArray());
                                 }
                             }
+                           
+
+                            Bitmap bmp1 = new Bitmap(spriteImage.Width, spriteImage.Height);
+                            using (Graphics g = Graphics.FromImage(bmp1))
+                            {
+                                var brush = new TextureBrush(spriteImage);
+                                g.FillPath(brush, graphic_path);
+                            }
+
+                            Bitmap bmp3 = BitmapFromPivot(bmp1, pivot);
+                            return bmp3;
                         }
                         catch
                         {
@@ -110,14 +151,13 @@ namespace AssetStudio
                         }
                     }
 
-                    //Rectangle
-                    spriteImage.RotateFlip(RotateFlipType.RotateNoneFlipY);
-                    return spriteImage;
+                    Bitmap bmp2 = BitmapFromPivot(spriteImage, pivot);
+                    return bmp2;
                 }
             }
-
             return null;
         }
+
 
         private static Vector2[][] GetTriangles(SpriteRenderData m_RD)
         {
